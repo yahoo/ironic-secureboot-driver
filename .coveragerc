@@ -1,0 +1,6 @@
+[run]
+branch = True
+source = ironic_secureboot_driver
+
+[report]
+ignore_errors = True
