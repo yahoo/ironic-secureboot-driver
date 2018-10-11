@@ -3,28 +3,44 @@
 # https://github.com/yahoo/ironic-secureboot-driver
 
 import base64
+import json
 import os
 
 from oslo_utils import fileutils
+import requests
 
 from ironic.common import boot_devices
 from ironic.common import exception as ironic_exc
+from ironic.common import states
 from ironic.common import utils
 from ironic.conductor import utils as manager_utils
 from ironic.conf import CONF
 from ironic.drivers import base
 from ironic.drivers import ipmi
 from ironic.drivers.modules import pxe
+from ironic.drivers.modules import iscsi_deploy
 
 
 class SecurebootIPMIHardware(ipmi.IPMIHardware):
     @property
     def supported_boot_interfaces(self):
-        return [Secureboot]
+        return [Secureboot, pxe.PXEBoot]
 
     @property
     def supported_deploy_interfaces(self):
-        return [pxe.PXERamdiskDeploy]
+        return [pxe.PXERamdiskDeploy, iscsi_deploy.ISCSIDeploy]
+
+    @property
+    def supported_power_interfaces(self):
+        interfaces = super(SecurebootIPMIHardware,
+                           self).supported_power_interfaces
+        return interfaces + [HttpmiPower]
+
+    @property
+    def supported_management_interfaces(self):
+        interfaces = super(SecurebootIPMIHardware,
+                           self).supported_management_interfaces
+        return interfaces + [HttpmiManagement]
 
 
 SECUREBOOT_PROPERTIES = {
@@ -131,3 +147,70 @@ class Secureboot(base.BootInterface):
         # TODO(jroll) okay to not raise an exception here?
         utils.rmtree_without_raise(_insecure_http_root(node.uuid))
         utils.rmtree_without_raise(_secure_http_root(node.uuid))
+
+
+def _get_httpmi_credentials(node):
+    driver_info = node.driver_info
+
+    credentials = {
+        'user': driver_info['ipmi_username'],
+        'password': driver_info['ipmi_password'],
+        'bmc': driver_info['ipmi_address'],
+    }
+
+    port = driver_info.get('ipmi_port')
+    if port:
+        credentials['port'] = port
+
+    return credentials
+
+
+def _call_httpmi(node, method, path, **kwargs):
+    url = node.driver_info['httpmi_url']
+    url += path
+    payload = _get_httpmi_credentials(node)
+    payload.update(kwargs)
+    res = getattr(requests, method)(url, data=payload)
+    return res.json()
+
+
+class HttpmiPower(base.PowerInterface):
+    def get_properties(self):
+        return {}
+
+    def validate(self, task):
+        pass
+
+    def get_power_state(self, task):
+        data = _call_httpmi(task.node, 'get', '/power')
+        return data['state']
+
+    def set_power_state(self, task, power_state, timeout=None):
+        _call_httpmi(task.node, 'post', '/power', state=power_state)
+
+    def reboot(self, task, timeout=None):
+        _call_httpmi(task.node, 'post', '/power', state=states.POWER_OFF)
+        _call_httpmi(task.node, 'post', '/power', state=states.POWER_ON)
+
+
+class HttpmiManagement(base.ManagementInterface):
+    def get_properties(self):
+        return {}
+
+    def validate(self, task):
+        pass
+
+    def get_supported_boot_devices(self, task):
+        return [boot_devices.PXE, boot_devices.DISK]
+
+    def set_boot_device(self, task, device, persistent=False):
+        if device == boot_devices.DISK:
+            device = 'hd'
+        _call_httpmi(task.node, 'post', '/boot-device', device=device)
+
+    def get_boot_device(self, task):
+        res = _call_httpmi(task.node, 'get', '/boot-device')
+        return res['device']
+
+    def get_sensors_data(self, task):
+        return {}
