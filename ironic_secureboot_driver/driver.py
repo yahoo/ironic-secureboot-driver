@@ -171,6 +171,12 @@ def _call_httpmi(node, method, path, **kwargs):
     payload = _get_httpmi_credentials(node)
     payload.update(kwargs)
     res = getattr(requests, method)(url, data=payload)
+    if res.status_code != 200:
+        # TODO log some stuff here
+        # TODO add some retries
+        raise ironic_exc.IPMIFailure(cmd='httpmi call to to %(url)s '
+                                         'with args %(kwargs)s' % {
+                                             'url': url, 'kwargs': kwargs})
     return res.json()
 
 
